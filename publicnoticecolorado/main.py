@@ -24,7 +24,10 @@ CONSECUTIVE_FAIL_LIMIT = 2
 SESSION_ID  = f"pnc_{int(time.time())}"
 colorado_tz = pytz.timezone('America/Denver')
 today_co    = datetime.datetime.now(colorado_tz)
-date_str = f"{today_co.month}/{today_co.day}/{today_co.year}"
+yesterday    = today_co - datetime.timedelta(days=1)
+date_from_str = f"{yesterday.month}/{yesterday.day}/{yesterday.year}"
+date_to_str   = f"{today_co.month}/{today_co.day}/{today_co.year}"
+date_str      = date_from_str  # is_valid_search için
 
 
 # Sitekey ilk CAPTCHA'dan alındığında buraya kaydedilecek
@@ -38,9 +41,9 @@ SEARCH_ACTIONS = [
     {"type": "wait", "wait_time_s": 3},
     {"type": "click",  "selector": {"type": "css", "value": "#ctl00_ContentPlaceHolder1_as1_divDateRange"}},
     {"type": "click",  "selector": {"type": "css", "value": "#ctl00_ContentPlaceHolder1_as1_txtDateFrom"}},
-    {"type": "input",  "selector": {"type": "css", "value": "#ctl00_ContentPlaceHolder1_as1_txtDateFrom"}, "value": date_str},
+    {"type": "input",  "selector": {"type": "css", "value": "#ctl00_ContentPlaceHolder1_as1_txtDateFrom"}, "value": date_from_str},
     {"type": "click",  "selector": {"type": "css", "value": "#ctl00_ContentPlaceHolder1_as1_txtDateTo"}},
-    {"type": "input",  "selector": {"type": "css", "value": "#ctl00_ContentPlaceHolder1_as1_txtDateTo"}, "value": date_str},
+    {"type": "input",  "selector": {"type": "css", "value": "#ctl00_ContentPlaceHolder1_as1_txtDateTo"}, "value": date_to_str},
     {"type": "click",  "selector": {"type": "css", "value": "#ctl00_ContentPlaceHolder1_as1_rbRange"}},
     {"type": "click",  "selector": {"type": "css", "value": "#ctl00_ContentPlaceHolder1_as1_btnGo"}},
     {"type": "wait_for_element", "selector": {"type": "css", "value": ".wsResultsGrid"}, "timeout_s": 20},

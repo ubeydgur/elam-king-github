@@ -33,7 +33,7 @@ SEARCH_RETRIES = 8
 colorado_tz = pytz.timezone('America/Denver')
 today_co    = datetime.datetime.now(colorado_tz)
 date_to     = today_co.strftime("%m/%d/%Y")
-date_from   = (today_co - timedelta(days=5)).strftime("%m/%d/%Y")
+date_from   = (today_co - timedelta(days=6)).strftime("%m/%d/%Y")
 
 print(f"Aratılacak Tarihler: {date_from} - {date_to}")
 print(f"Session: {SESSION_ID}")
