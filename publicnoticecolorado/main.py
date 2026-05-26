@@ -24,16 +24,7 @@ CONSECUTIVE_FAIL_LIMIT = 2
 SESSION_ID  = f"pnc_{int(time.time())}"
 colorado_tz = pytz.timezone('America/Denver')
 today_co    = datetime.datetime.now(colorado_tz)
-from datetime import timedelta
-
-date_from = today_co - timedelta(days=30)
-date_from_str = f"{date_from.month}/{date_from.day}/{date_from.year}"
-date_to_str   = f"{today_co.month}/{today_co.day}/{today_co.year}"
-date_str      = date_to_str  # is_valid_search için
-
-date_from_str = "5/23/2026"
-date_to_str   = "5/23/2026"
-
+date_str = f"{today_co.month}/{today_co.day}/{today_co.year}"
 
 
 # Sitekey ilk CAPTCHA'dan alındığında buraya kaydedilecek
@@ -47,9 +38,9 @@ SEARCH_ACTIONS = [
     {"type": "wait", "wait_time_s": 3},
     {"type": "click",  "selector": {"type": "css", "value": "#ctl00_ContentPlaceHolder1_as1_divDateRange"}},
     {"type": "click",  "selector": {"type": "css", "value": "#ctl00_ContentPlaceHolder1_as1_txtDateFrom"}},
-    {"type": "input",  "selector": {"type": "css", "value": "#ctl00_ContentPlaceHolder1_as1_txtDateFrom"}, "value": date_from_str},
+    {"type": "input",  "selector": {"type": "css", "value": "#ctl00_ContentPlaceHolder1_as1_txtDateFrom"}, "value": date_str},
     {"type": "click",  "selector": {"type": "css", "value": "#ctl00_ContentPlaceHolder1_as1_txtDateTo"}},
-    {"type": "input",  "selector": {"type": "css", "value": "#ctl00_ContentPlaceHolder1_as1_txtDateTo"}, "value": date_to_str},
+    {"type": "input",  "selector": {"type": "css", "value": "#ctl00_ContentPlaceHolder1_as1_txtDateTo"}, "value": date_str},
     {"type": "click",  "selector": {"type": "css", "value": "#ctl00_ContentPlaceHolder1_as1_rbRange"}},
     {"type": "click",  "selector": {"type": "css", "value": "#ctl00_ContentPlaceHolder1_as1_btnGo"}},
     {"type": "wait_for_element", "selector": {"type": "css", "value": ".wsResultsGrid"}, "timeout_s": 20},
@@ -84,8 +75,8 @@ def is_valid_search(html):
     if "El Paso" not in text:
         print("  Kontrol: El Paso seçilmemiş")
         return False
-    if date_from_str not in text:
-        print(f"  Kontrol: Tarih ({date_from_str}) bulunamadı")
+    if date_str not in text:
+        print(f"  Kontrol: Tarih ({date_str}) bulunamadı")
         return False
     return True
 

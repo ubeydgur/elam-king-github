@@ -1,0 +1,49 @@
+name: Daily Scrapers
+
+on:
+  schedule:
+    - cron: '0 10 * * *'  # Her gün 05:00 EST
+  workflow_dispatch:
+
+jobs:
+  publicnotice:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - run: pip install requests beautifulsoup4 pytz pdfplumber
+      - run: python publicnoticecolorado/main.py
+        env:
+          DECODO_TOKEN: ${{ secrets.DECODO_TOKEN }}
+          CAPTCHA_KEY:  ${{ secrets.CAPTCHA_KEY }}
+          WEBHOOK_URL:  ${{ secrets.WEBHOOK_URL }}
+      - uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: publicnotice-output
+          path: |
+            publicnoticecolorado/notices.csv
+            publicnoticecolorado/notices.json
+
+  publicrecords:
+    runs-on: ubuntu-latest
+    needs: publicnotice
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - run: pip install requests beautifulsoup4 pytz
+      - run: python publicrecordsearch/main.py
+        env:
+          DECODO_TOKEN: ${{ secrets.DECODO_TOKEN }}
+          WEBHOOK_URL:  ${{ secrets.WEBHOOK_URL }}
+      - uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: publicrecords-output
+          path: |
+            publicrecordsearch/elpaso_records.csv
+            publicrecordsearch/elpaso_records.json
