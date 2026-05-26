@@ -2,15 +2,15 @@ name: Daily Scrapers
 
 on:
   schedule:
-    - cron: '0 10 * * *'  # Her gün 05:00 EST
+    - cron: '0 10 * * *'
   workflow_dispatch:
 
 jobs:
   publicnotice:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-python@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
       - run: pip install requests beautifulsoup4 pytz pdfplumber
@@ -25,15 +25,15 @@ jobs:
         with:
           name: publicnotice-output
           path: |
-            publicnoticecolorado/notices.csv
-            publicnoticecolorado/notices.json
+            notices.csv
+            notices.json
 
   publicrecords:
     runs-on: ubuntu-latest
     needs: publicnotice
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-python@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
       - run: pip install requests beautifulsoup4 pytz
@@ -47,5 +47,5 @@ jobs:
         with:
           name: publicrecords-output
           path: |
-            publicrecordsearch/elpaso_records.csv
-            publicrecordsearch/elpaso_records.json
+            elpaso_records.csv
+            elpaso_records.json
