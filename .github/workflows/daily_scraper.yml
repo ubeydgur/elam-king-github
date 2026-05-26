@@ -19,6 +19,7 @@ jobs:
           DECODO_TOKEN: ${{ secrets.DECODO_TOKEN }}
           CAPTCHA_KEY:  ${{ secrets.CAPTCHA_KEY }}
           WEBHOOK_URL:  ${{ secrets.WEBHOOK_URL }}
+          PYTHONUNBUFFERED: "1"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -40,6 +41,7 @@ jobs:
         env:
           DECODO_TOKEN: ${{ secrets.DECODO_TOKEN }}
           WEBHOOK_URL:  ${{ secrets.WEBHOOK_URL }}
+          PYTHONUNBUFFERED: "1"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
