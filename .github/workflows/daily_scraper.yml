@@ -19,7 +19,7 @@ jobs:
           DECODO_TOKEN: ${{ secrets.DECODO_TOKEN }}
           CAPTCHA_KEY:  ${{ secrets.CAPTCHA_KEY }}
           WEBHOOK_URL:  ${{ secrets.WEBHOOK_URL }}
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: publicnotice-output
@@ -40,7 +40,7 @@ jobs:
         env:
           DECODO_TOKEN: ${{ secrets.DECODO_TOKEN }}
           WEBHOOK_URL:  ${{ secrets.WEBHOOK_URL }}
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: publicrecords-output
