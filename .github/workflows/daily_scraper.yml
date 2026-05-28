@@ -9,8 +9,8 @@ jobs:
   publicnotice:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
       - run: pip install requests beautifulsoup4 pytz pdfplumber
@@ -20,7 +20,7 @@ jobs:
           CAPTCHA_KEY:  ${{ secrets.CAPTCHA_KEY }}
           WEBHOOK_URL:  ${{ secrets.WEBHOOK_URL }}
           PYTHONUNBUFFERED: "1"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         if: always()
         with:
           name: publicnotice-output
@@ -32,8 +32,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: publicnotice
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
       - run: pip install requests beautifulsoup4 pytz
@@ -42,7 +42,7 @@ jobs:
           DECODO_TOKEN: ${{ secrets.DECODO_TOKEN }}
           WEBHOOK_URL:  ${{ secrets.WEBHOOK_URL }}
           PYTHONUNBUFFERED: "1"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         if: always()
         with:
           name: publicrecords-output
