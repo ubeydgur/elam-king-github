@@ -6,6 +6,8 @@ import datetime
 from datetime import timedelta
 import json
 import os
+import sys
+import itertools
 
 TOKEN       = os.environ["DECODO_TOKEN"]
 WEBHOOK_URL = os.environ["WEBHOOK_URL"]
@@ -16,8 +18,6 @@ API_URL     = "https://scraper-api.decodo.com/v2/scrape"
 TARGET_URL  = "https://publicrecordsearch.elpasoco.com/RealEstate/SearchEntry.aspx"
 RESULTS_URL = "https://publicrecordsearch.elpasoco.com/RealEstate/SearchResults.aspx"
 
-SESSION_ID = f"elpaso_{int(time.time())}"
-
 api_headers = {
     "accept": "application/json",
     "content-type": "application/json",
@@ -26,6 +26,41 @@ api_headers = {
 
 MAX_RETRIES    = 5
 SEARCH_RETRIES = 8
+
+# ── Cascade kontrolü (Yöntem 2: cooldown + içeride yeniden başla) ────
+# Decodo bazen bozuk session lease veriyor — arama OK ama detaylar anında
+# fail. Bu durumda refresh etmek de işe yaramıyor (cascade). Aşağıdaki
+# limitler cascade'i tespit edip 120sn bekleyip taze başlatır.
+MAX_REFRESHES_PER_ROUND = 3   # 1 round'da kaç refresh denenecek
+MAX_ROUNDS              = 3   # toplam kaç round (cooldown'lu deneme)
+COOLDOWN_SEC            = 120 # round'lar arası bekleme süresi
+
+# ── Session yönetimi ─────────────────────────────────────
+# FIX #1: Session "failed" olunca aynı id'yle tekrar denemek işe yaramıyordu.
+# Her refresh'te YENİ session_id üretiyoruz. itertools.count, aynı saniye içinde
+# çağrılsa bile benzersizlik garantisi veriyor.
+_session_counter = itertools.count(1)
+
+def new_session_id():
+    return f"elpaso_{int(time.time())}_{next(_session_counter)}"
+
+SESSION_ID = new_session_id()
+
+# Ardışık fail sayacı — SADECE success'te veya refresh sonrası sıfırlanır,
+# sayfa sınırında DEĞİL (eski bug buydu).
+consecutive_fails = 0
+
+# Cascade kontrolü sayaçları (Yöntem 2)
+# refresh_count: bu round'da kaç refresh yapıldı (başarılı record'ta sıfırlanır)
+# round_number: kaçıncı round'dayız (cooldown sonrası artar)
+refresh_count = 0
+round_number  = 1
+
+
+class DecodoExhausted(Exception):
+    """Tüm round'lar tükendi, Decodo session düzelmiyor.
+    Yakalandığında eldeki kayıtlar yine de kaydedilip webhook'a gönderilir."""
+    pass
 
 # ==========================================
 # TARİH HESAPLAMA
@@ -71,7 +106,9 @@ SEARCH_ACTIONS = [
     {"type": "click", "selector": {"type": "css", "value": "#cphNoMargin_f_dclDocType_69"}},
     {"type": "wait", "wait_time_s": 2},
     {"type": "click",            "selector": {"type": "css",   "value": "#cphNoMargin_SearchButtons1_btnSearch"}},
-    {"type": "wait_for_element", "selector": {"type": "xpath", "value": "//*[contains(text(), 'records found') or contains(text(), 'Criteria')]"}, "timeout_s": 30},
+    # FIX: Eski xpath //* tüm DOM'u tarıyordu (yavaş). TotalRows span'i sadece
+    # arama başarılı olunca render oluyor — daha temiz signal.
+    {"type": "wait_for_element", "selector": {"type": "css", "value": "#cphNoMargin_cphNoMargin_SearchCriteriaTop_TotalRows"}, "timeout_s": 30},
 ]
 
 
@@ -171,18 +208,33 @@ def parse_detail(html):
     }
 
 
+def detail_has_content(html):
+    """FIX #2: Geçerli bir detay sayfası mı?
+    Session ölünce gelen sayfa parse'ta tüm alanları boş çıkarıyor ve eski kod
+    bunu 'başarılı' sayıp çöp kayıt gönderiyordu (kayıt 95-100 vakası).
+    instrument_number her gerçek kayıtta dolu olur — bunu kontrol ediyoruz."""
+    soup = BeautifulSoup(html, "html.parser")
+    el = soup.find('span', id=re.compile('txtInstrumentNo$'))
+    return bool(el and el.get_text(strip=True))
+
+
 # ==========================================
 # YARDIMCI FONKSİYONLAR
 # ==========================================
 def do_search(session_id):
     for attempt in range(1, SEARCH_RETRIES + 1):
         print(f"  Deneme {attempt}/{SEARCH_RETRIES}...")
-        r = requests.post(API_URL, json={
-            "url": TARGET_URL,
-            "headless": "html",
-            "session_id": session_id,
-            "browser_actions": SEARCH_ACTIONS,
-        }, headers=api_headers)
+        try:
+            r = requests.post(API_URL, json={
+                "url": TARGET_URL,
+                "headless": "html",
+                "session_id": session_id,
+                "browser_actions": SEARCH_ACTIONS,
+            }, headers=api_headers, timeout=180)
+        except Exception as e:
+            print(f"  İstek hatası: {e}, tekrar deneniyor...")
+            time.sleep(30)
+            continue
         if r.ok:
             html = r.json().get("results", [{}])[0].get("content")
             if html and "records found" in html:
@@ -194,19 +246,81 @@ def do_search(session_id):
     return None
 
 
+def refresh_session(page_num=None):
+    """FIX #1: Yeni session_id üret, arama yap, gerekirse sayfaya dön.
+    Başarılıysa True döner. Global SESSION_ID'yi günceller.
+
+    YÖNTEM 2 — Cascade kontrolü:
+    Bu round'da MAX_REFRESHES_PER_ROUND kez refresh denenmiş ve hâlâ başarı
+    yoksa (cascade tespit edildi), COOLDOWN_SEC bekleyip yeni round'a geç.
+    MAX_ROUNDS'u da aşarsak DecodoExhausted raise et (run sonlanır)."""
+    global SESSION_ID, consecutive_fails, refresh_count, round_number
+
+    # Bu round'da limit aşıldı mı?
+    if refresh_count >= MAX_REFRESHES_PER_ROUND:
+        if round_number >= MAX_ROUNDS:
+            # Tüm round'lar tükendi — pes
+            print(f"\n  ⛔ {MAX_ROUNDS} round x {MAX_REFRESHES_PER_ROUND} refresh denendi, "
+                  f"Decodo session düzelmiyor. Eldeki kayıtlar kaydedilip çıkılacak.")
+            raise DecodoExhausted()
+
+        # Cooldown — Decodo'ya nefes aldır, sonra yeni round
+        print(f"\n  ⏸  Round {round_number} bitti ({MAX_REFRESHES_PER_ROUND} refresh boşa).")
+        print(f"  💾 Şimdiye kadarki kayıtlar kaydediliyor...")
+        checkpoint_save()
+        print(f"  ⏳ {COOLDOWN_SEC}sn bekleniyor (Decodo nefes alsın diye)...")
+        time.sleep(COOLDOWN_SEC)
+        round_number += 1
+        refresh_count = 0
+        print(f"  🔄 Round {round_number}/{MAX_ROUNDS} başlıyor...")
+
+    # Normal refresh
+    refresh_count += 1
+    SESSION_ID = new_session_id()
+    print(f"  → Yeni session açılıyor: {SESSION_ID} "
+          f"(round {round_number}, refresh {refresh_count}/{MAX_REFRESHES_PER_ROUND})")
+    html = do_search(SESSION_ID)
+    if not html:
+        print("  → Session yenileme BAŞARISIZ")
+        return False
+    # Session'ı doğru sayfaya getir (best-effort; global_id detay çekimi
+    # büyük ihtimalle sayfadan bağımsız ama garanti olsun diye).
+    if page_num and page_num > 1:
+        fetch_page(SESSION_ID, page_num)
+    consecutive_fails = 0
+    print(f"  → Session yenilendi.")
+    return True
+
+
 def fetch_page(session_id, page_num):
     for attempt in range(1, MAX_RETRIES + 1):
-        r = requests.post(API_URL, json={
-            "url": f"{RESULTS_URL}?pg={page_num}",
-            "headless": "html",
-            "session_id": session_id,
-        }, headers=api_headers)
+        try:
+            r = requests.post(API_URL, json={
+                "url": f"{RESULTS_URL}?pg={page_num}",
+                "headless": "html",
+                "session_id": session_id,
+            }, headers=api_headers, timeout=180)
+        except Exception:
+            time.sleep(5)
+            continue
         if r.ok:
             html = r.json().get("results", [{}])[0].get("content")
             if html and "records found" in html:
                 return html
         time.sleep(5)
     return None
+
+
+def get_page_html(page_num):
+    """FIX #4: Sayfa alınamazsa session ölmüş olabilir → yenile ve tekrar dene.
+    Eski kod sayfayı komple atlıyordu (sayfa 5 kaybı vakası)."""
+    html = fetch_page(SESSION_ID, page_num)
+    if html:
+        return html
+    print(f"  Sayfa {page_num} alınamadı, session yenileniyor...")
+    if refresh_session(page_num):
+        html = fetch_page(SESSION_ID, page_num)
+    return html
 
 
 def extract_ids(page_html):
@@ -221,29 +335,49 @@ def extract_ids(page_html):
 def fetch_detail(session_id, g_id):
     link = f"{RESULTS_URL}?global_id={g_id}&type=dtl"
     for attempt in range(1, MAX_RETRIES + 1):
-        r = requests.post(API_URL, json={
-            "url": link,
-            "headless": "html",
-            "session_id": session_id,
-            "browser_actions": [
-                {"type": "wait_for_element", "selector": {"type": "xpath",
-                 "value": "//*[contains(text(), 'Details') or contains(text(), 'Grantor')]"},
-                 "timeout_s": 20}
-            ]
-        }, headers=api_headers)
-        if r.ok:
-            html = r.json().get("results", [{}])[0].get("content")
-            if not html:
-                print(f"    Deneme {attempt}: İçerik boş")
-            elif "acknowledge" in html and "records found" not in html:
-                print(f"    Deneme {attempt}: Login sayfası")
-            elif "records found" in html:
-                print(f"    Deneme {attempt}: Arama sonuç sayfası döndü")
-            else:
-                return html
-        else:
+        try:
+            r = requests.post(API_URL, json={
+                "url": link,
+                "headless": "html",
+                "session_id": session_id,
+                "browser_actions": [
+                    {"type": "wait_for_element", "selector": {"type": "xpath",
+                     "value": "//*[contains(text(), 'Details') or contains(text(), 'Grantor')]"},
+                     "timeout_s": 20}
+                ]
+            }, headers=api_headers, timeout=180)
+        except Exception as e:
+            print(f"    Deneme {attempt}: istek hatası {e}")
+            time.sleep(5)
+            continue
+
+        if not r.ok:
             print(f"    Deneme {attempt}: HTTP {r.status_code}")
+            time.sleep(5)
+            continue
+
+        html = r.json().get("results", [{}])[0].get("content")
+        if not html:
+            print(f"    Deneme {attempt}: içerik boş")
+            time.sleep(5)
+            continue
+
+        # FIX #2 + erken çıkış: Login sayfası = session ölü. Aynı session'la
+        # retry anlamsız, hemen None dön ki çağıran refresh tetiklesin.
+        if "acknowledge" in html and "records found" not in html:
+            print(f"    Login sayfası (session ölü)")
+            return None
+        if "records found" in html:
+            print(f"    Deneme {attempt}: sonuç sayfası döndü")
+            time.sleep(5)
+            continue
+
+        # Gerçek detay içeriği var mı? (çöp kayıt engelleme)
+        if detail_has_content(html):
+            return html
+        print(f"    Deneme {attempt}: boş detay (içerik doğrulanamadı)")
         time.sleep(5)
+
     return None
 
 
@@ -256,9 +390,17 @@ if not html_p1:
     print("KRİTİK HATA: Arama başarısız.")
     exit(1)
 
-match       = re.search(r'(\d+)\s*records found', html_p1)
-total_records = int(match.group(1)) if match else 0
 soup_p1     = BeautifulSoup(html_p1, "html.parser")
+
+# FIX #3: total_records artık doğrudan TotalRows span'inden okunuyor.
+# Eski regex r'(\d+)\s*records found' çalışmıyordu çünkü sayı ile "records found"
+# ayrı span'larda, aralarında HTML var.
+total_records = 0
+tr_el = soup_p1.find('span', id=re.compile('TotalRows'))
+if tr_el:
+    digits = re.sub(r'\D', '', tr_el.get_text())
+    total_records = int(digits) if digits else 0
+
 sel_el      = soup_p1.find('select', {'name': lambda x: x and 'ItemList' in x if x else False})
 total_pages = len(sel_el.find_all('option')) if sel_el else 1
 print(f"  Toplam kayıt: {total_records} | Toplam sayfa: {total_pages}")
@@ -277,79 +419,116 @@ records    = []
 record_num = 0
 failed_ids = []
 
-# Session takip değişkenleri
-consecutive_login_fails = 0
-last_failed_id          = None
 
-for page_num in range(1, total_pages + 1):
-    print(f"\n{'='*50}")
-    print(f"[SAYFA {page_num}/{total_pages}]")
+def checkpoint_save():
+    """Ara kayıt — her 50 kayıtta CSV'ye yaz."""
+    with open(CSV_FILE, 'w', newline='', encoding='utf-8-sig') as f:
+        writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
+        writer.writeheader()
+        writer.writerows(records)
+    print(f"  💾 {len(records)} kayıt kaydedildi")
 
-    if page_num == 1:
-        page_html = html_p1
-    else:
-        print(f"  ?pg={page_num} ile gidiliyor...")
-        page_html = fetch_page(SESSION_ID, page_num)
-        if not page_html:
-            print(f"  UYARI: Sayfa {page_num} alınamadı, atlanıyor!")
-            continue
 
-    page_ids = extract_ids(page_html)
-    print(f"  {len(page_ids)} kayıt bulundu.")
+def process_id(g_id, page_num):
+    """Bir g_id'yi işle. Başarılıysa records'a ekler ve True, değilse False döner.
+    Session ölümünü tespit edince refresh edip bir kez daha dener."""
+    global consecutive_fails, refresh_count
 
-    
+    detail_html = fetch_detail(SESSION_ID, g_id)
 
-    # Bu değişkeni döngü başında tanımla:
-    consecutive_login_fails = 0
+    if detail_html is None:
+        consecutive_fails += 1
+        # 2 ardışık fail = session öldü
+        if consecutive_fails >= 2:
+            print(f"\n  ⚠️  Session öldü ({consecutive_fails} ardışık fail), yenileniyor...")
+            if refresh_session(page_num):  # consecutive_fails'i 0'lar
+                detail_html = fetch_detail(SESSION_ID, g_id)
 
-    # Detail fetch bloğunu şu şekilde değiştir:
-    for g_id in page_ids:
-        record_num += 1
-        print(f"  [{record_num}/{total_records}] {g_id}...", end=" ", flush=True)
+    if detail_html is None:
+        return False
 
-        detail_html = fetch_detail(SESSION_ID, g_id)
+    # Başarı: hem consecutive_fails'i hem refresh_count'u sıfırla.
+    # refresh_count'un sıfırlanması cascade tespitini doğru tutuyor —
+    # "ilerleme kaydedilmeden yapılan ardışık refresh" sayılıyor.
+    consecutive_fails = 0
+    refresh_count = 0
+    records.append(parse_detail(detail_html))
+    return True
 
-        if detail_html is None:
-            consecutive_login_fails += 1
-            # 2 ardışık başarısızlık = session sona erdi
-            if consecutive_login_fails >= 2:
-                print(f"\n  ⚠️  Session sona erdi! Yeniden oturum açılıyor...")
-                new_html = do_search(SESSION_ID)
-                if new_html:
-                    # Bulunduğumuz sayfaya geri dön
-                    if page_num > 1:
-                        fetch_page(SESSION_ID, page_num)
-                    consecutive_login_fails = 0
-                    print(f"  Session yenilendi, sayfa {page_num}'e dönüldü. Tekrar deneniyor...")
-                    detail_html = fetch_detail(SESSION_ID, g_id)
 
-            if detail_html is None:
-                failed_ids.append(g_id)
-                print(f"BAŞARISIZ")
-            else:
-                consecutive_login_fails = 0
-                row = parse_detail(detail_html)
-                records.append(row)
+# YÖNTEM 2: Ana döngü + retry pass'i try/except DecodoExhausted ile sarıyoruz.
+# Cascade tespit edildiğinde 3 round x 3 refresh tükenirse exception fırlar;
+# eldeki kayıtlar yine de kaydedilip webhook'a gönderilir, sonra exit(1).
+exhausted = False
+try:
+    for page_num in range(1, total_pages + 1):
+        print(f"\n{'='*50}")
+        print(f"[SAYFA {page_num}/{total_pages}]")
+
+        if page_num == 1:
+            page_html = html_p1
+        else:
+            print(f"  ?pg={page_num} ile gidiliyor...")
+            page_html = get_page_html(page_num)
+            if not page_html:
+                print(f"  UYARI: Sayfa {page_num} session yenilemeye rağmen alınamadı, atlanıyor!")
+                continue
+
+        page_ids = extract_ids(page_html)
+        print(f"  {len(page_ids)} kayıt bulundu.")
+
+        for g_id in page_ids:
+            record_num += 1
+            print(f"  [{record_num}/{total_records}] {g_id}...", end=" ", flush=True)
+
+            if process_id(g_id, page_num):
+                row = records[-1]
                 print(f"✓  {row['document_type']} | {row['grantee'][:40]}")
                 if len(records) % 50 == 0:
-                    with open(CSV_FILE, 'w', newline='', encoding='utf-8-sig') as f:
-                        writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
-                        writer.writeheader()
-                        writer.writerows(records)
-                    print(f"  💾 {len(records)} kayıt kaydedildi")
-        else:
-            consecutive_login_fails = 0
-            row = parse_detail(detail_html)
-            records.append(row)
-            print(f"✓  {row['document_type']} | {row['grantee'][:40]}")
-            if len(records) % 50 == 0:
-                with open(CSV_FILE, 'w', newline='', encoding='utf-8-sig') as f:
-                    writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
-                    writer.writeheader()
-                    writer.writerows(records)
-                print(f"  💾 {len(records)} kayıt kaydedildi")
+                    checkpoint_save()
+            else:
+                failed_ids.append(g_id)
+                print(f"BAŞARISIZ")
 
-        time.sleep(2)
+            time.sleep(2)
+
+
+    # ==========================================
+    # AŞAMA 4: Başarısız ID'ler için retry pass
+    # ==========================================
+    # FIX #5: Eski kod failed_ids'i sadece print ediyordu. Artık taze session'la
+    # bir tur daha deniyoruz. global_id detay çekimi sayfadan bağımsız olduğu için
+    # hangi sayfada olduklarını bilmemize gerek yok.
+    if failed_ids:
+        print(f"\n{'='*50}")
+        print(f"[RETRY] {len(failed_ids)} başarısız ID tekrar deneniyor...")
+        retry_targets = failed_ids[:]
+        failed_ids = []
+
+        if refresh_session():
+            for g_id in retry_targets:
+                print(f"  RETRY {g_id}...", end=" ", flush=True)
+                detail_html = fetch_detail(SESSION_ID, g_id)
+                if detail_html is None:
+                    # Bir kez daha taze session dene
+                    if refresh_session():
+                        detail_html = fetch_detail(SESSION_ID, g_id)
+                if detail_html is not None:
+                    records.append(parse_detail(detail_html))
+                    print(f"✓  {records[-1]['document_type']}")
+                else:
+                    failed_ids.append(g_id)
+                    print("BAŞARISIZ")
+                time.sleep(2)
+        else:
+            print("  Retry için session açılamadı, atlanıyor.")
+            failed_ids = retry_targets
+
+except DecodoExhausted:
+    exhausted = True
+    print(f"\n{'='*50}")
+    print("⛔ Decodo cascade — eldeki kayıtlar kaydediliyor ve webhook'a gönderiliyor.")
+    print("   Bir sonraki cron run veya manuel re-run muhtemelen düzelir.")
 
 
 # ==========================================
@@ -375,8 +554,17 @@ if records:
     # Webhook — 100'er 100'er gönder
     for i in range(0, len(records), BATCH_SIZE):
         batch = records[i:i + BATCH_SIZE]
-        resp  = requests.post(WEBHOOK_URL, json=batch)
-        print(f"Webhook batch {i//BATCH_SIZE + 1}: {resp.status_code} ({len(batch)} kayıt)")
+        try:
+            resp = requests.post(WEBHOOK_URL, json=batch, timeout=120)
+            ok = 200 <= resp.status_code < 300
+            flag = "✓" if ok else "⚠️"
+            print(f"{flag} Webhook batch {i//BATCH_SIZE + 1}: {resp.status_code} ({len(batch)} kayıt)")
+            if not ok:
+                # 2xx değilse açıkça uyar. 524 = Cloudflare timeout, n8n'e
+                # ulaşmış ama cevap dönmemiş olabilir — n8n log'undan teyit et.
+                print(f"    UYARI: 2xx değil. Veri n8n'e düştü mü belirsiz, n8n execution log'unu kontrol et.")
+        except Exception as e:
+            print(f"⚠️ Webhook batch {i//BATCH_SIZE + 1} hatası: {e}")
         time.sleep(1)
 
     # JSON kaydet
@@ -385,3 +573,10 @@ if records:
     print("elpaso_records.json kaydedildi.")
 else:
     print("Webhook/JSON: Gönderilecek veri yok")
+
+
+# YÖNTEM 2: Decodo cascade ile çıktıysak exit(1) ile son ver. Böylece
+# GitHub Actions job'ı "failed" görür, bir sonraki cron temiz başlar.
+if exhausted:
+    print("\n⛔ Run incomplete (Decodo cascade). exit(1)")
+    sys.exit(1)
