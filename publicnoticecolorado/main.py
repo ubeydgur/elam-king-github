@@ -30,9 +30,6 @@ date_to_str   = f"{today_co.month}/{today_co.day}/{today_co.year}"
 date_str      = date_from_str  # is_valid_search için
 
 
-# Sitekey ilk CAPTCHA'dan alındığında buraya kaydedilecek
-captcha_sitekey = None
-
 SEARCH_ACTIONS = [
     {"type": "wait_for_element", "selector": {"type": "css", "value": "#ctl00_ContentPlaceHolder1_as1_divCounty"}, "timeout_s": 20},
     {"type": "click",  "selector": {"type": "css", "value": "#ctl00_ContentPlaceHolder1_as1_divCounty"}},
@@ -103,15 +100,19 @@ def do_search():
     return None
 
 
-# ── YARDIMCI: 2captcha ile CAPTCHA çöz ───────────────────
-def solve_captcha(pageurl, sitekey, retries=5):
+# ── YARDIMCI: 2captcha ile CAPTCHA çöz (Turnstile + reCAPTCHA) ─────────
+def solve_captcha(pageurl, sitekey, captcha_type="turnstile", retries=5):
+    # 2captcha method + parametreleri sağlayıcıya göre seç
+    if captcha_type == "turnstile":
+        in_params = {"key": CAPTCHA_KEY, "method": "turnstile",
+                     "sitekey": sitekey, "pageurl": pageurl, "json": 1}
+    else:  # recaptcha
+        in_params = {"key": CAPTCHA_KEY, "method": "userrecaptcha",
+                     "googlekey": sitekey, "pageurl": pageurl, "json": 1}
+
     for attempt in range(1, retries + 1):
         try:
-            resp = requests.post("http://2captcha.com/in.php", data={
-                "key": CAPTCHA_KEY, "method": "userrecaptcha",
-                "googlekey": sitekey,
-                "pageurl": pageurl, "json": 1,
-            })
+            resp = requests.post("http://2captcha.com/in.php", data=in_params)
             captcha_id = resp.json().get("request")
         except Exception as e:
             print(f"  2captcha gönderim hatası (deneme {attempt}/{retries}): {e}")
@@ -138,10 +139,19 @@ def solve_captcha(pageurl, sitekey, retries=5):
     return None
 
 
+# ── YARDIMCI: Hangi CAPTCHA sağlayıcısı? (site değişirse GÜNCELLENECEK TEK YER) ──
+def detect_captcha(html):
+    """Interstitial'daki CAPTCHA tipini + POST alan adını döndür.
+    Bilinmeyen sağlayıcı gelirse (None, None) → çağıran yüksek sesle uyarır."""
+    if "cf-turnstile" in html or "challenges.cloudflare.com/turnstile" in html:
+        return "turnstile", "cf-turnstile-response"
+    if "g-recaptcha" in html or "www.google.com/recaptcha" in html or "recaptcha/api.js" in html:
+        return "recaptcha", "g-recaptcha-response"
+    return None, None
+
+
 # ── YARDIMCI: Detay sayfasını al — retry'lı ──────────────
 def fetch_detail(detail_url, notice_id):
-    global captcha_sitekey
-
     for attempt in range(1, MAX_RETRIES + 1):
         html = decodo_get(detail_url, retries=1)
         if not html:
@@ -149,21 +159,29 @@ def fetch_detail(detail_url, notice_id):
             time.sleep(5)
             continue
 
-        # CAPTCHA varsa çöz
-        if "reCAPTCHA" in html:
-            # Sitekey'i ilk kez HTML'den al
-            if not captcha_sitekey:
-                sk = re.search(r'data-sitekey=["\']([^"\']+)["\']', html)
-                if sk:
-                    captcha_sitekey = sk.group(1)
-                    print(f"  Sitekey alındı: {captcha_sitekey}")
-                else:
-                    print("  Sitekey bulunamadı!")
-                    time.sleep(5)
-                    continue
+        # ── Interstitial ("I Agree" + CAPTCHA) sayfası mı? ────────────────
+        # Tespiti CAPTCHA tipinden DEĞİL, sitenin kendi butonundan yapıyoruz
+        # → sağlayıcı değişse bile burası kırılmaz.
+        if "btnViewNotice" in html:
+            captcha_type, response_field = detect_captcha(html)
 
-            print(f"  CAPTCHA çözülüyor... (deneme {attempt}/{MAX_RETRIES})")
-            token = solve_captcha(detail_url, captcha_sitekey)
+            if captcha_type is None:
+                # Bilinen CAPTCHA yok → site değişmiş olabilir. Sessiz dönme, BAĞIR.
+                keys = re.findall(r'data-sitekey=["\']([^"\']+)["\']', html)
+                print("  ⚠️⚠️ CAPTCHA TANINAMADI — site interstitial'ı değişmiş olabilir!")
+                print(f"       'I Agree' sayfasındayız ama turnstile/recaptcha yok. sitekey'ler: {keys}")
+                print("       → detect_captcha() güncellenmeli. Bu notice atlanıyor.")
+                return None
+
+            sk_match = re.search(r'data-sitekey=["\']([^"\']+)["\']', html)
+            if not sk_match:
+                print("  Sitekey bulunamadı!")
+                time.sleep(5)
+                continue
+            sitekey = sk_match.group(1)
+
+            print(f"  CAPTCHA ({captcha_type}) çözülüyor... (deneme {attempt}/{MAX_RETRIES})")
+            token = solve_captcha(detail_url, sitekey, captcha_type=captcha_type)
             if not token:
                 time.sleep(5)
                 continue
@@ -179,11 +197,11 @@ def fetch_detail(detail_url, notice_id):
                 "ctl00_ToolkitScriptManager1_HiddenField": "",
                 "__EVENTTARGET": "", "__EVENTARGUMENT": "",
                 "__VIEWSTATE": vs, "__VIEWSTATEGENERATOR": vsg, "__EVENTVALIDATION": ev,
-                "g-recaptcha-response": token,
+                response_field: token,
                 "ctl00$ContentPlaceHolder1$PublicNoticeDetailsBody1$btnViewNotice": "I Agree, View Notice",
             }, headers={"User-Agent": "Mozilla/5.0", "Referer": post_url}).text
 
-            if "reCAPTCHA" in html:
+            if "btnViewNotice" in html:
                 print(f"  CAPTCHA geçilemedi (deneme {attempt}/{MAX_RETRIES})")
                 time.sleep(5)
                 continue
