@@ -239,9 +239,9 @@ def do_search(session_id):
             html = r.json().get("results", [{}])[0].get("content")
             if html and "records found" in html:
                 return html
-            print(f"  Sonuç yok, tekrar deneniyor...")
+            print(f"  Sonuç yok, tekrar deneniyor... | İÇERİK: {(html or '')[:300]}")
         else:
-            print(f"  HTTP {r.status_code}, tekrar deneniyor...")
+            print(f"  HTTP {r.status_code}, tekrar deneniyor... | BODY: {r.text[:500]}")
         time.sleep(30)
     return None
 
@@ -352,7 +352,7 @@ def fetch_detail(session_id, g_id):
             continue
 
         if not r.ok:
-            print(f"    Deneme {attempt}: HTTP {r.status_code}")
+            print(f"    Deneme {attempt}: HTTP {r.status_code} | BODY: {r.text[:500]}")
             time.sleep(5)
             continue
 
@@ -431,25 +431,26 @@ def checkpoint_save():
 
 def process_id(g_id, page_num):
     """Bir g_id'yi işle. Başarılıysa records'a ekler ve True, değilse False döner.
-    Session ölümünü tespit edince refresh edip bir kez daha dener."""
+    FIX A: fetch_detail None dönerse (session ölümü — HTTP 400 expired/failed ya da
+    login sayfası) 2. fail'i BEKLEMEDEN hemen refresh edip AYNI kaydı yeniden dener.
+    Eski kod ilk fail'i failed_ids'e atıp sadece sonraki kaydı kurtarıyordu; session
+    tam bir kaydı çekerken ölünce o kayıt kalıcı kayboluyordu (günlük 1-7 kayıp)."""
     global consecutive_fails, refresh_count
 
     detail_html = fetch_detail(SESSION_ID, g_id)
 
     if detail_html is None:
         consecutive_fails += 1
-        # 2 ardışık fail = session öldü
-        if consecutive_fails >= 2:
-            print(f"\n  ⚠️  Session öldü ({consecutive_fails} ardışık fail), yenileniyor...")
-            if refresh_session(page_num):  # consecutive_fails'i 0'lar
-                detail_html = fetch_detail(SESSION_ID, g_id)
+        print(f"\n  ⚠️  Fail ({g_id}) — session yenilenip bu kayıt yeniden deneniyor...")
+        # refresh_session doğru sayfaya gider + consecutive_fails'i 0'lar. Cascade
+        # koruması hâlâ geçerli: refresh_count/round limitleri kötü günde DecodoExhausted
+        # fırlatıp temiz çıkarır.
+        if refresh_session(page_num):
+            detail_html = fetch_detail(SESSION_ID, g_id)
 
     if detail_html is None:
         return False
 
-    # Başarı: hem consecutive_fails'i hem refresh_count'u sıfırla.
-    # refresh_count'un sıfırlanması cascade tespitini doğru tutuyor —
-    # "ilerleme kaydedilmeden yapılan ardışık refresh" sayılıyor.
     consecutive_fails = 0
     refresh_count = 0
     records.append(parse_detail(detail_html))
@@ -487,7 +488,7 @@ try:
                 if len(records) % 50 == 0:
                     checkpoint_save()
             else:
-                failed_ids.append(g_id)
+                failed_ids.append((g_id, page_num))   # FIX B: sayfa no ile sakla
                 print(f"BAŞARISIZ")
 
             time.sleep(2)
@@ -496,33 +497,35 @@ try:
     # ==========================================
     # AŞAMA 4: Başarısız ID'ler için retry pass
     # ==========================================
-    # FIX #5: Eski kod failed_ids'i sadece print ediyordu. Artık taze session'la
-    # bir tur daha deniyoruz. global_id detay çekimi sayfadan bağımsız olduğu için
-    # hangi sayfada olduklarını bilmemize gerek yok.
+    # FIX B: global_id detay çekimi SAYFADAN BAĞIMSIZ DEĞİL — session, kaydın
+    # bulunduğu sonuç sayfasında olmalı; değilse site detay yerine arama sonucunu
+    # döndürüyor ("sonuç sayfası döndü", eski retry pass hiç çalışmıyordu). Bu yüzden
+    # her başarısız kayıt için önce o sayfaya gidiyoruz (get_page_html).
     if failed_ids:
         print(f"\n{'='*50}")
-        print(f"[RETRY] {len(failed_ids)} başarısız ID tekrar deneniyor...")
+        print(f"[RETRY] {len(failed_ids)} başarısız kayıt tekrar deneniyor...")
         retry_targets = failed_ids[:]
         failed_ids = []
 
-        if refresh_session():
-            for g_id in retry_targets:
-                print(f"  RETRY {g_id}...", end=" ", flush=True)
-                detail_html = fetch_detail(SESSION_ID, g_id)
-                if detail_html is None:
-                    # Bir kez daha taze session dene
-                    if refresh_session():
-                        detail_html = fetch_detail(SESSION_ID, g_id)
-                if detail_html is not None:
-                    records.append(parse_detail(detail_html))
-                    print(f"✓  {records[-1]['document_type']}")
-                else:
-                    failed_ids.append(g_id)
-                    print("BAŞARISIZ")
+        for g_id, page_num in retry_targets:
+            print(f"  RETRY {g_id} (sayfa {page_num})...", end=" ", flush=True)
+            # Session'ı kaydın sayfasına getir (gerekirse içinde refresh eder)
+            page_html = get_page_html(page_num)
+            if not page_html:
+                failed_ids.append((g_id, page_num))
+                print("BAŞARISIZ (sayfa alınamadı)")
                 time.sleep(2)
-        else:
-            print("  Retry için session açılamadı, atlanıyor.")
-            failed_ids = retry_targets
+                continue
+            detail_html = fetch_detail(SESSION_ID, g_id)
+            if detail_html is None and refresh_session(page_num):
+                detail_html = fetch_detail(SESSION_ID, g_id)
+            if detail_html is not None:
+                records.append(parse_detail(detail_html))
+                print(f"✓  {records[-1]['document_type']}")
+            else:
+                failed_ids.append((g_id, page_num))
+                print("BAŞARISIZ")
+            time.sleep(2)
 
 except DecodoExhausted:
     exhausted = True
@@ -545,7 +548,7 @@ else:
     print("Hiç kayıt toplanamadı.")
 
 if failed_ids:
-    print(f"Başarısız olan {len(failed_ids)} ID: {failed_ids}")
+    print(f"Başarısız olan {len(failed_ids)} ID: {[x[0] for x in failed_ids]}")
 
 print(f"\nToplam: {len(records)} başarılı / {len(failed_ids)} başarısız / {total_records} beklenen")
 
