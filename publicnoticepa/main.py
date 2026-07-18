@@ -212,11 +212,17 @@ def fetch_detail(detail_url, notice_id):
                 time.sleep(5)
                 continue
 
-        # İçerik kontrolü
-        if "Notice Content" in html or "lblContentText" in html:
-            return html
+        # İçerik kontrolü — marker DEĞİL, gerçekten dolu mu? (session bozulunca boş
+        # şablon geliyor; onu 'başarılı' saymayalım ki refresh tetiklensin.)
+        if "lblContentText" in html or "Notice Content" in html:
+            _chk = BeautifulSoup(html, "html.parser")
+            _c   = _chk.find("span", id=re.compile("lblContentText"))
+            _h   = _c.find("span", style=re.compile(r"display\s*:\s*none")) if _c else None
+            if _h: _h.extract()
+            if (_c and _c.get_text(strip=True)) or _chk.find("a", href=re.compile("PDFDocument", re.I)):
+                return html
 
-        print(f"  Geçersiz içerik (deneme {attempt}/{MAX_RETRIES})")
+        print(f"  Boş/geçersiz içerik (deneme {attempt}/{MAX_RETRIES})")
         time.sleep(5)
 
     return None
@@ -301,6 +307,7 @@ for i, notice_id in enumerate(all_ids, 1):
 
         if consecutive_fails >= CONSECUTIVE_FAIL_LIMIT:
             print(f"\n  Session yenileniyor...")
+            SESSION_ID = f"pnpa_{int(time.time())}_{i}"   # taze id — 'failed' session aynı id'yle düzelmiyor
             new_html = do_search()
             if new_html:
                 new_sid = re.search(r'SID=([a-z0-9]+)', new_html)
