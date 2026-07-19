@@ -72,3 +72,28 @@ jobs:
           path: |
             pa_notices.csv
             pa_notices.json
+
+  chestercountypa:
+    runs-on: ubuntu-latest
+    needs: publicnoticepa
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - run: pip install requests pytz
+      - run: python chestercountypa/main.py
+        env:
+          CAPTCHA_KEY:       ${{ secrets.CAPTCHA_KEY }}
+          DECODO_PROXY_USER: ${{ secrets.DECODO_PROXY_USER }}
+          DECODO_PROXY_PASS: ${{ secrets.DECODO_PROXY_PASS }}
+          WEBHOOK_URL:       ${{ secrets.WEBHOOK_URL }}
+          PYTHONUNBUFFERED: "1"
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: chestercountypa-output
+          path: |
+            chester_records.csv
+            chester_records.json
+
