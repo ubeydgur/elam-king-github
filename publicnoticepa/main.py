@@ -11,6 +11,8 @@ CAPTCHA_KEY = os.environ["CAPTCHA_KEY"]
 WEBHOOK_URL = os.environ["WEBHOOK_URL"]
 BATCH_SIZE  = 100
 
+ALLOWED_COUNTIES = {"chester", "delaware"}   # müşteri: sadece bu ikisi (site fazladan county döndürüyor)
+
 api_headers = {
     "accept": "application/json",
     "content-type": "application/json",
@@ -370,7 +372,11 @@ for i, notice_id in enumerate(all_ids, 1):
         "pdfText":           pdf_text,
         "scraped_at":        datetime.datetime.now(colorado_tz).strftime("%Y-%m-%d %H:%M"),
     }
+    if record["publicationCounty"].strip().lower() not in ALLOWED_COUNTIES:
+        print(f"  ⏭  Atlandı — {record['publicationCounty']} (Chester/Delaware dışı)")
+        continue
     results.append(record)
+
     print(f"  ✓ {record['publicationCity']} | pdf={'✓' if pdf_text else '✗'}")
     
     # Her 50 kayıtta CSV'ye yaz
